@@ -2,13 +2,12 @@ import os
 from flask import Flask, request
 from markitdown import MarkItDown
 
-# Safe fallback imports for image text extraction (OCR)
+# Safe fallback for Python-native OCR
 try:
-    import pytesseract
-    from PIL import Image as PILImage
-    TESSERACT_AVAILABLE = True
+    import easyocr
+    EASYOCR_AVAILABLE = True
 except ImportError:
-    TESSERACT_AVAILABLE = False
+    EASYOCR_AVAILABLE = False
 
 app = Flask(__name__)
 
@@ -30,20 +29,26 @@ def convert():
 
         # --- ROUTE A: IMAGE FILES (.png, .jpg, .jpeg) ---
         if filename.endswith(('.png', '.jpg', '.jpeg')):
-            if TESSERACT_AVAILABLE:
-                print("Routing image through local Tesseract OCR engine...")
-                extracted_text = pytesseract.image_to_string(PILImage.open(temp_filename))
+            if EASYOCR_AVAILABLE:
+                print("Routing image through native EasyOCR engine...")
+                # Initialize the reader for English text
+                reader = easyocr.Reader(['en'], gpu=False)
+                # Extract text lines from the temporary file path
+                results = reader.readtext(temp_filename, detail=0)
                 
-                # Clean up the file
+                # Clean up the temp workspace file
                 if os.path.exists(temp_filename):
                     os.remove(temp_filename)
+                
+                # Join sentences back with line breaks
+                extracted_text = "\n".join(results)
                 
                 if extracted_text.strip():
                     return extracted_text, 200
                 else:
-                    return "OCR complete: No readable text characters detected in this image.", 200
+                    return "OCR complete: No readable characters detected in this image.", 200
             else:
-                return "Error: Image OCR tools are missing on the hosting server.", 500
+                return "Error: EasyOCR engine failed to initialize.", 500
 
         # --- ROUTE B: STRUCTURAL TEXT FILES (.xml, .json, .txt) ---
         if filename.endswith(('.xml', '.json', '.txt')):
@@ -54,7 +59,6 @@ def convert():
                 os.remove(temp_filename)
                 
             file_extension = filename.split('.')[-1]
-            # Wrap the plain code inside a markdown code block for clean layout syntax
             return f"```{file_extension}\n{text_content}\n```", 200
 
         # --- ROUTE C: STANDARD DOCUMENTS (.pdf, .docx, .xlsx, .pptx) ---
@@ -69,7 +73,6 @@ def convert():
 
     except Exception as e:
         print(f"!!! CRITICAL PYTHON CRASH !!!: {str(e)}")
-        # Clean up temp file if a crash occurs mid-execution
         if 'temp_filename' in locals() and os.path.exists(temp_filename):
             os.remove(temp_filename)
         return f"Internal Server Error: {str(e)}", 500
