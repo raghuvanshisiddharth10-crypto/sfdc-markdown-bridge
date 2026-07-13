@@ -1,5 +1,6 @@
 import os
 from flask import Flask, request
+from flask_cors import CORS  # Ensure flask-cors is in your requirements.txt
 from markitdown import MarkItDown
 
 try:
@@ -11,8 +12,21 @@ except ImportError:
 
 app = Flask(__name__)
 
-@app.route('/convert', methods=['POST'])
+# --- CONFIGURE CORS POLICY FOR SALESFORCE ORG ---
+CORS(app, resources={
+    r"/*": {
+        "origins": ["https://sidd-idp2-dev-ed.trailblaze.lightning.force.com"],
+        "methods": ["POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "X-File-Name"]
+    }
+})
+
+@app.route('/convert', methods=['POST', 'OPTIONS'])
 def convert():
+    # Instantly intercept and pass the browser's preflight check
+    if request.method == 'OPTIONS':
+        return '', 200
+
     try:
         filename = request.headers.get('X-File-Name', 'document.pdf').lower()
         print(f"Processing inbound request for file: {filename}")
