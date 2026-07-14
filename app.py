@@ -3,7 +3,8 @@ import gc
 import io
 from flask import Flask, request, Response
 from flask_cors import CORS  
-from markitdown import MarkItDown
+import openpyxl
+from pypdf import PdfReader
 
 try:
     import pytesseract
@@ -23,71 +24,88 @@ CORS(app, resources={
     }
 })
 
-# Instantiate MarkItDown globally once to avoid re-allocation memory overhead per request
-md = MarkItDown()
-
 @app.route('/convert', methods=['POST', 'OPTIONS'])
 def convert():
     if request.method == 'OPTIONS':
         return '', 200
 
+    file_bytes = None
     try:
         filename = request.headers.get('X-File-Name', 'document.pdf').lower()
-        file_ext = "." + filename.split('.')[-1]
         print(f"Processing inbound request for file: {filename}")
 
-        # Stream the body directly into an in-memory byte buffer instead of request.data
-        # request.stream reads the chunk sequentially, bypassing heavy string caching
+        # Stream the body directly into an in-memory byte buffer
         file_bytes = io.BytesIO(request.get_data(parse_form_data=False))
         
         if file_bytes.getbuffer().nbytes == 0:
             return "Empty request body", 400
 
-        # --- ROUTE A: IMAGE FILES ---
-        if filename.endswith(('.png', '.jpg', '.jpeg')):
+        # --- ROUTE A: LIGHTWEIGHT PDF PARSING (NO ONNX / NO MARKITDOWN) ---
+        if filename.endswith('.pdf'):
+            print("Routing PDF through lightweight pypdf engine...")
+            reader = PdfReader(file_bytes)
+            extracted_text = []
+            
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text()
+                if text:
+                    extracted_text.append(f"## Page {i+1}\n\n{text}")
+            
+            markdown_output = "\n\n".join(extracted_text)
+            if not markdown_output.strip():
+                markdown_output = "*No machine-readable text found in PDF.*"
+                
+            return Response(markdown_output, mimetype='text/plain')
+
+        # --- ROUTE B: LIGHTWEIGHT EXCEL PARSING (NO ONNX / NO MARKITDOWN) ---
+        elif filename.endswith(('.xlsx', '.xls')):
+            print("Routing Excel through lightweight openpyxl engine...")
+            wb = openpyxl.load_workbook(file_bytes, read_only=True, data_only=True)
+            markdown_sheets = []
+            
+            for sheet_name in wb.sheetnames:
+                sheet = wb[sheet_name]
+                markdown_sheets.append(f"## Sheet: {sheet_name}\n")
+                
+                for row in sheet.iter_rows(values_only=True):
+                    # Filter out completely empty rows
+                    if any(cell is not None for cell in row):
+                        row_vals = [str(cell) if cell is not None else "" for cell in row]
+                        markdown_sheets.append("| " + " | ".join(row_vals) + " |")
+                
+                markdown_sheets.append("\n")
+            
+            markdown_output = "\n".join(markdown_sheets)
+            return Response(markdown_output, mimetype='text/plain')
+
+        # --- ROUTE C: IMAGE FILES (TESSERACT) ---
+        elif filename.endswith(('.png', '.jpg', '.jpeg')):
             if TESSERACT_AVAILABLE:
                 print("Routing image through Docker-optimized Tesseract engine...")
                 img = PILImage.open(file_bytes)
                 extracted_text = pytesseract.image_to_string(img)
-                
-                # Explicit cleanup
                 del img
-                file_bytes.close()
-                
                 response_text = extracted_text if extracted_text.strip() else "OCR complete: No readable text found."
                 return Response(response_text, mimetype='text/plain')
             else:
-                file_bytes.close()
                 return "Error: Tesseract not available inside Docker container.", 500
 
-        # --- ROUTE B: STRUCTURAL TEXT FILES ---
-        if filename.endswith(('.xml', '.json', '.txt')):
+        # --- ROUTE D: STRUCTURAL TEXT FILES ---
+        elif filename.endswith(('.xml', '.json', '.txt')):
             text_content = file_bytes.getvalue().decode('utf-8', errors='ignore')
-            file_bytes.close()
             return Response(f"```{filename.split('.')[-1]}\n{text_content}\n```", mimetype='text/plain')
 
-        # --- ROUTE C: STANDARD DOCUMENTS (PDF & XLSX) ---
-        print(f"Streaming document matrix through Microsoft MarkItDown using extension: {file_ext}")
-        
-        # We use convert_stream to parse byte-by-byte from memory instead of loading files from disk
-        result = md.convert_stream(file_bytes, file_extension=file_ext)
-        markdown_text = result.text_content
-        
-        # Explicitly destroy structural references before finishing the execution cycle
-        del result
-        file_bytes.close()
-
-        return Response(markdown_text, mimetype='text/plain')
+        else:
+            return f"Unsupported file extension: {filename}", 400
 
     except Exception as e:
         print(f"!!! CRITICAL PYTHON CRASH !!!: {str(e)}")
-        if 'file_bytes' in locals():
-            file_bytes.close()
         return f"Internal Server Error: {str(e)}", 500
 
     finally:
-        # CRITICAL FIX FOR 256MB TIERS: Clear dangling memory addresses instantly
-        # Forces Python to immediately free memory blocks back to Render
+        if file_bytes:
+            file_bytes.close()
+        # Force instantaneous memory cleanup
         gc.collect()
 
 if __name__ == '__main__':
