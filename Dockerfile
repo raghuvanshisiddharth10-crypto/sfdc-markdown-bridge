@@ -19,5 +19,8 @@ COPY . .
 # Expose the port Gunicorn runs on
 EXPOSE 10000
 
-# Start Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--timeout", "120", "app:app"]
+# Start Gunicorn with memory-recycling constraints
+# --workers 1: Limits the application to a single process container to save baseline RAM
+# --threads 2: Uses lightweight threads to handle I/O without duplicating the Python process space
+# --max-requests 10: Automatically restarts the worker after 10 requests to wipe out memory leaks
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "1", "--threads", "2", "--max-requests", "10", "--timeout", "120", "app:app"]
