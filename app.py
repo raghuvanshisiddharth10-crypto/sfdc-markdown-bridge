@@ -1,6 +1,7 @@
 import os
 import gc
 import io
+import csv  # Built-in Python library (0MB RAM footprint)
 from flask import Flask, request, Response
 from flask_cors import CORS  
 import openpyxl
@@ -40,48 +41,66 @@ def convert():
         if file_bytes.getbuffer().nbytes == 0:
             return "Empty request body", 400
 
-        # --- ROUTE A: LIGHTWEIGHT PDF PARSING (NO ONNX / NO MARKITDOWN) ---
+        # --- ROUTE A: LIGHTWEIGHT PDF PARSING ---
         if filename.endswith('.pdf'):
             print("Routing PDF through lightweight pypdf engine...")
             reader = PdfReader(file_bytes)
             extracted_text = []
-            
             for i, page in enumerate(reader.pages):
                 text = page.extract_text()
                 if text:
                     extracted_text.append(f"## Page {i+1}\n\n{text}")
-            
             markdown_output = "\n\n".join(extracted_text)
             if not markdown_output.strip():
                 markdown_output = "*No machine-readable text found in PDF.*"
-                
             return Response(markdown_output, mimetype='text/plain')
 
-        # --- ROUTE B: LIGHTWEIGHT EXCEL PARSING (NO ONNX / NO MARKITDOWN) ---
+        # --- ROUTE B: LIGHTWEIGHT EXCEL PARSING (.xlsx) ---
         elif filename.endswith(('.xlsx', '.xls')):
             print("Routing Excel through lightweight openpyxl engine...")
             wb = openpyxl.load_workbook(file_bytes, read_only=True, data_only=True)
             markdown_sheets = []
-            
             for sheet_name in wb.sheetnames:
                 sheet = wb[sheet_name]
                 markdown_sheets.append(f"## Sheet: {sheet_name}\n")
-                
                 for row in sheet.iter_rows(values_only=True):
-                    # Filter out completely empty rows
                     if any(cell is not None for cell in row):
                         row_vals = [str(cell) if cell is not None else "" for cell in row]
                         markdown_sheets.append("| " + " | ".join(row_vals) + " |")
-                
                 markdown_sheets.append("\n")
-            
             markdown_output = "\n".join(markdown_sheets)
             return Response(markdown_output, mimetype='text/plain')
 
-        # --- ROUTE C: IMAGE FILES (TESSERACT) ---
+        # --- NEW ROUTE C: LIGHTWEIGHT NATIVE CSV PARSING ---
+        elif filename.endswith('.csv'):
+            print("Routing CSV through native string memory parser...")
+            # Decode binary stream into standard text characters safely
+            csv_text = file_bytes.getvalue().decode('utf-8', errors='ignore')
+            
+            # Read split lines utilizing Python's structured string CSV parser
+            csv_reader = csv.reader(io.StringIO(csv_text))
+            markdown_rows = []
+            
+            for index, row in enumerate(csv_reader):
+                if not row or all(cell.strip() == "" for cell in row):
+                    continue # Skip blank spacer rows
+                
+                # Format elements into crisp markdown row strings
+                clean_row = "| " + " | ".join([cell.replace("|", "\\|") for cell in row]) + " |"
+                markdown_rows.append(clean_row)
+                
+                # Automatically construct the essential Markdown table separation row right below headers
+                if index == 0:
+                    separator = "| " + " | ".join(["---"] * len(row)) + " |"
+                    markdown_rows.append(separator)
+            
+            markdown_output = "\n".join(markdown_rows)
+            return Response(markdown_output, mimetype='text/plain')
+
+        # --- ROUTE D: IMAGE FILES (TESSERACT) ---
         elif filename.endswith(('.png', '.jpg', '.jpeg')):
             if TESSERACT_AVAILABLE:
-                print("Routing image through Docker-optimized Tesseract engine...")
+                print("Routing image through Tesseract engine...")
                 img = PILImage.open(file_bytes)
                 extracted_text = pytesseract.image_to_string(img)
                 del img
@@ -90,7 +109,7 @@ def convert():
             else:
                 return "Error: Tesseract not available inside Docker container.", 500
 
-        # --- ROUTE D: STRUCTURAL TEXT FILES ---
+        # --- ROUTE E: STRUCTURAL TEXT FILES ---
         elif filename.endswith(('.xml', '.json', '.txt')):
             text_content = file_bytes.getvalue().decode('utf-8', errors='ignore')
             return Response(f"```{filename.split('.')[-1]}\n{text_content}\n```", mimetype='text/plain')
@@ -105,7 +124,6 @@ def convert():
     finally:
         if file_bytes:
             file_bytes.close()
-        # Force instantaneous memory cleanup
         gc.collect()
 
 if __name__ == '__main__':
